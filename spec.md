@@ -47,22 +47,24 @@ Across a benchmark run (excluding any configured warmup period), `llmendpoint-pe
 
 ## 3. Storage Architecture & Evaluation Tasks
 
-`llmendpoint-perf` organizes work into named **Evaluation Tasks**. All artifacts for all tasks are stored under a base path defined by the environment variable `LLMENDPOINTPERF_GCS_BASEPATH` (supports `gs://bucket/path` URLs as well as local filesystem paths for local testing).
+`llmendpoint-perf` organizes work into named **Evaluation Tasks**. All artifacts for all tasks are stored under a base path defined by the environment variable `LLMENDPOINTPERF_BASEPATH` (supports `gs://bucket/path` URLs as well as local filesystem paths for local testing).
 
-Each evaluation task `<task-name>` stores its artifacts under `$LLMENDPOINTPERF_GCS_BASEPATH/<task-name>/`:
+Each evaluation task `<task-name>` stores its artifacts under `$LLMENDPOINTPERF_BASEPATH/<task-name>/`:
 
 ```text
-$LLMENDPOINTPERF_GCS_BASEPATH/<task-name>/
+$LLMENDPOINTPERF_BASEPATH/<task-name>/
 ├── config.yaml                          # Master configuration file for the task
 ├── dataset-generation.log               # Log of synthetic dataset generation activities
 ├── prompts.jsonl                        # Generated (or user-supplied) evaluation prompts
-├── YYYYMMDD-HHMMSS-run-config.yaml      # Immutable snapshot of config.yaml used for a run
-├── YYYYMMDD-HHMMSS-run-results.jsonl    # Aggregated summary metrics and statistical distributions
-├── YYYYMMDD-HHMMSS-run-calls.jsonl      # Detailed per-request telemetry and raw responses
-└── YYYYMMDD-HHMMSS-run-log.txt          # Execution log for the run (mirrors stdout)
+└── runs/
+    └── YYYYMMDD-HHMMSS/                 # Dedicated directory per benchmark run (UTC timestamp)
+        ├── config.yaml                  # Immutable snapshot of config.yaml used for this run
+        ├── results.jsonl                # Aggregated summary metrics and statistical distributions
+        ├── calls.jsonl                  # Detailed per-request telemetry and raw responses
+        └── log.txt                      # Execution log for the run (mirrors stdout)
 ```
 
-> **Note on Timestamps**: Run artifacts are prefixed with UTC timestamps in `YYYYMMDD-HHMMSS` format so multiple runs of the same task (e.g., across different concurrency settings or endpoints) are cleanly versioned and chronologically sortable.
+> **Note on Run Folders**: Each run is isolated in its own `run/YYYYMMDD-HHMMSS/` directory (using UTC timestamps) so multiple runs of the same task (e.g., across different concurrency settings or endpoints) are cleanly organized, chronologically sortable, and contain clean, unprefixed artifact filenames.
 
 ---
 
@@ -77,7 +79,7 @@ To generate `num_items` distinct evaluation prompts without mode collapse or rep
 3. **Concurrent Generation**: Generation requests are executed concurrently (controlled by `dataset.num_threads`, defaulting to 5) with automatic retries on transient errors.
 
 ### 4.2 Output Format (`prompts.jsonl`)
-The generated dataset is saved to `$LLMENDPOINTPERF_GCS_BASEPATH/<task-name>/prompts.jsonl`, where each line is a valid JSON object formatted for an OpenAI-compatible `/v1/chat/completions` request:
+The generated dataset is saved to `$LLMENDPOINTPERF_BASEPATH/<task-name>/prompts.jsonl`, where each line is a valid JSON object formatted for an OpenAI-compatible `/v1/chat/completions` request:
 
 **Text-only format:**
 ```json
@@ -100,20 +102,20 @@ Supported image sources for multimodal dataset generation:
 
 When running an evaluation (`llmendpoint-perf run`), the execution engine performs the following steps:
 
-1. **Initialization & Snapshot**: Reads `config.yaml` and `prompts.jsonl` from `$LLMENDPOINTPERF_GCS_BASEPATH/<task-name>/`, validates parameters, and writes `YYYYMMDD-HHMMSS-run-config.yaml`.
+1. **Initialization & Snapshot**: Reads `config.yaml` and `prompts.jsonl` from `$LLMENDPOINTPERF_BASEPATH/<task-name>/`, validates parameters, creates the run directory `$LLMENDPOINTPERF_BASEPATH/<task-name>/run/YYYYMMDD-HHMMSS/`, and writes a snapshot of the active configuration to `run/YYYYMMDD-HHMMSS/config.yaml`.
 2. **Optional Warmup Phase**: If `warmup_requests > 0`, dispatches warmup calls to prime connection pools and endpoint caches before starting the measurement clock.
 3. **Multi-Threaded Load Generation**:
    * Spawns `num_threads` concurrent worker threads.
    * Dispatches streaming requests against `model_endpoint`, pacing requests using `wait_time_between_requests_ms` (either per-worker delay or global rate pacing).
    * Cycles through `prompts.jsonl` (sequentially or randomly according to `sampling_strategy`) until `run_time_secs` elapses (or `max_requests` is reached, if specified).
-4. **Live Progress & Logging**: Streams structured progress updates (elapsed time, active requests, rolling RPS, rolling p50/p95 TTFT & TPOT, error count) to both `stdout` and `YYYYMMDD-HHMMSS-run-log.txt`.
+4. **Live Progress & Logging**: Streams structured progress updates (elapsed time, active requests, rolling RPS, rolling p50/p95 TTFT & TPOT, error count) to both `stdout` and `run/YYYYMMDD-HHMMSS/log.txt`.
 5. **Artifact Persistence**:
-   * Streams each completed/failed request record to `YYYYMMDD-HHMMSS-run-calls.jsonl`.
-   * Computes final statistical aggregations and writes them to `YYYYMMDD-HHMMSS-run-results.jsonl`.
+   * Streams each completed/failed request record to `run/YYYYMMDD-HHMMSS/calls.jsonl`.
+   * Computes final statistical aggregations and writes them to `run/YYYYMMDD-HHMMSS/results.jsonl`.
 
 ### 5.1 Artifact Schemas
 
-#### `YYYYMMDD-HHMMSS-run-calls.jsonl` (One JSON object per request)
+#### `run/YYYYMMDD-HHMMSS/calls.jsonl` (One JSON object per request)
 ```json
 {
   "request_id": "uuid4",
@@ -138,7 +140,7 @@ When running an evaluation (`llmendpoint-perf run`), the execution engine perfor
 }
 ```
 
-#### `YYYYMMDD-HHMMSS-run-results.jsonl` (Summary object per run)
+#### `run/YYYYMMDD-HHMMSS/results.jsonl` (Summary object per run)
 Contains run metadata, configuration summary, total duration, request counts (total, succeeded, failed by error type), throughput (`rps`, `output_tps`, `total_tps`, `slo_goodput_rps`), cost summary, and percentile distributions (`mean`, `std`, `min`, `p50`, `p90`, `p95`, `p99`, `max`) for `ttft_ms`, `tpot_ms`, `e2e_latency_ms`, `input_tokens`, and `output_tokens`.
 
 ---
@@ -150,7 +152,7 @@ llmendpoint-perf <command> [options]
 ```
 
 ### Available Commands
-* **`init`**: Initializes a new evaluation task in `$LLMENDPOINTPERF_GCS_BASEPATH/<task-name>` with a template `config.yaml` (or uploads a local `config.yaml`).
+* **`init`**: Initializes a new evaluation task in `$LLMENDPOINTPERF_BASEPATH/<task-name>` with a template `config.yaml` (or uploads a local `config.yaml`).
   ```bash
   llmendpoint-perf init <task-name> [--config ./local-config.yaml]
   ```
@@ -158,7 +160,7 @@ llmendpoint-perf <command> [options]
   ```bash
   llmendpoint-perf generate_dataset <task-name> [--overwrite]
   ```
-* **`run`**: Executes the benchmark evaluation task and writes `run-results.jsonl`, `run-calls.jsonl`, `run-config.yaml`, and `run-log.txt`. Both `stdout` and `run-log.txt` receive identical formatted output.
+* **`run`**: Executes the benchmark evaluation task and writes `results.jsonl`, `calls.jsonl`, `config.yaml`, and `log.txt` under `run/YYYYMMDD-HHMMSS/`. Both `stdout` and `log.txt` receive identical formatted output.
   ```bash
   llmendpoint-perf run <task-name> [--config-override key=value ...]
   ```
@@ -225,11 +227,13 @@ evaluation:
 
 * **v0.1 (Initial Draft)**:
   * Defined core objectives (latency, throughput, cost performance, synthetic dataset generation).
-  * Specified GCS artifact storage under `LLMENDPOINTPERF_GCS_BASEPATH`, `prompts.jsonl` format (text and base64 multimodal), basic CLI (`generate_dataset`, `run`), and base `config.yaml` structure.
+  * Specified GCS artifact storage under `LLMENDPOINTPERF_BASEPATH`, `prompts.jsonl` format (text and base64 multimodal), basic CLI (`generate_dataset`, `run`), and base `config.yaml` structure.
 * **v0.2 (2026-10-01 — Structured Specification & Feature Enhancements)**:
   * **Streaming & Metric Definitions (Section 2)**: Explicitly specified SSE streaming (`stream: true`, `include_usage: true`) as the mechanism to decouple **TTFT** (Time to First Token) from **TPOT/ITL** (Time Per Output Token) and **E2E Latency**, and added support for reasoning and cached token accounting.
   * **Statistical Aggregations & Goodput**: Added percentile distributions (`p50`, `p90`, `p95`, `p99`), error rate tracking, and SLO-based **Goodput** (`slo_goodput_rps`).
-  * **Storage & Artifact Schemas (Sections 3 & 5)**: Standardized run timestamp prefixes to `YYYYMMDD-HHMMSS`, documented directory layout, and defined concrete JSON schemas for `run-calls.jsonl` and `run-results.jsonl`.
+  * **Storage & Artifact Schemas (Sections 3 & 5)**: Standardized run timestamp identifiers to `YYYYMMDD-HHMMSS`, documented directory layout, and defined concrete JSON schemas for call and result artifacts.
   * **Synthetic Dataset Enhancements (Section 4)**: Added entropy/variation injection to prevent repetitive prompts, concurrent dataset generation (`dataset.num_threads`), and explicit `multimodal` configuration options (synthetic rendered images vs. image directory/GCS sampling).
   * **CLI Expansion (Section 6)**: Added `init`, `inspect`, and `compare` commands to support the full lifecycle of defining, executing, and inspecting evaluation tasks.
   * **Configuration Schema (Section 7)**: Preserved full backward compatibility with the original minimal `config.yaml` while adding optional sections for `api_key_env`, `warmup_requests`, `request_timeout_secs`, `generation_params`, `pricing` (enabling the cost metrics required by Section 1), and `slo`.
+* **v0.3 (2026-10-01 — Dedicated Run Subfolders)**:
+  * Updated Section 3, Section 5, and Section 6 so each run creates its own `run/YYYYMMDD-HHMMSS/` subfolder containing `config.yaml`, `results.jsonl`, `calls.jsonl`, and `log.txt` without redundant date prefixes on the filenames.
