@@ -4,6 +4,10 @@ Technical and cost performance benchmarking framework for OpenAI-compatible LLM 
 
 `llmendpoint-perf` generates synthetic text and multimodal (text + image) benchmark datasets, runs multi-threaded streaming load tests against `/v1/chat/completions` endpoints, records granular per-request latency and token telemetry, and provides both CLI and interactive Web UI tools to inspect and compare runs.
 
+
+![screenshot](imgs/llmendpoint-ui.png)
+
+
 ---
 
 ## Installation
