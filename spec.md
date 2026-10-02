@@ -64,7 +64,7 @@ $LLMENDPOINTPERF_BASEPATH/<task-name>/
         └── log.txt                      # Execution log for the run (mirrors stdout)
 ```
 
-> **Note on Run Folders**: Each run is isolated in its own `run/YYYYMMDD-HHMMSS/` directory (using UTC timestamps) so multiple runs of the same task (e.g., across different concurrency settings or endpoints) are cleanly organized, chronologically sortable, and contain clean, unprefixed artifact filenames.
+> **Note on Run Folders**: Each run is isolated in its own `runs/YYYYMMDD-HHMMSS/` directory (using UTC timestamps) so multiple runs of the same task (e.g., across different concurrency settings or endpoints) are cleanly organized, chronologically sortable, and contain clean, unprefixed artifact filenames.
 
 ---
 
@@ -102,20 +102,20 @@ Supported image sources for multimodal dataset generation:
 
 When running an evaluation (`llmendpoint-perf run`), the execution engine performs the following steps:
 
-1. **Initialization & Snapshot**: Reads `config.yaml` and `prompts.jsonl` from `$LLMENDPOINTPERF_BASEPATH/<task-name>/`, validates parameters, creates the run directory `$LLMENDPOINTPERF_BASEPATH/<task-name>/run/YYYYMMDD-HHMMSS/`, and writes a snapshot of the active configuration to `run/YYYYMMDD-HHMMSS/config.yaml`.
+1. **Initialization & Snapshot**: Reads `config.yaml` and `prompts.jsonl` from `$LLMENDPOINTPERF_BASEPATH/<task-name>/`, validates parameters, creates the run directory `$LLMENDPOINTPERF_BASEPATH/<task-name>/runs/YYYYMMDD-HHMMSS/`, and writes a snapshot of the active configuration to `runs/YYYYMMDD-HHMMSS/config.yaml`.
 2. **Optional Warmup Phase**: If `warmup_requests > 0`, dispatches warmup calls to prime connection pools and endpoint caches before starting the measurement clock.
 3. **Multi-Threaded Load Generation**:
    * Spawns `num_threads` concurrent worker threads.
-   * Dispatches streaming requests against `model_endpoint`, pacing requests using `wait_time_between_requests_ms` (either per-worker delay or global rate pacing).
+   * Dispatches streaming requests against `model_endpoint`, pacing requests using `wait_time_between_requests_ms` via a thread-safe `RequestPacer`.
    * Cycles through `prompts.jsonl` (sequentially or randomly according to `sampling_strategy`) until `run_time_secs` elapses (or `max_requests` is reached, if specified).
-4. **Live Progress & Logging**: Streams structured progress updates (elapsed time, active requests, rolling RPS, rolling p50/p95 TTFT & TPOT, error count) to both `stdout` and `run/YYYYMMDD-HHMMSS/log.txt`.
+4. **Live Progress & Logging**: Streams structured progress updates (elapsed time, active requests, rolling RPS, rolling p50/p95 TTFT & TPOT, error count) to both `stdout` and `runs/YYYYMMDD-HHMMSS/log.txt`.
 5. **Artifact Persistence**:
-   * Streams each completed/failed request record to `run/YYYYMMDD-HHMMSS/calls.jsonl`.
-   * Computes final statistical aggregations and writes them to `run/YYYYMMDD-HHMMSS/results.jsonl`.
+   * Streams each completed/failed request record to `runs/YYYYMMDD-HHMMSS/calls.jsonl`.
+   * Computes final statistical aggregations and writes them to `runs/YYYYMMDD-HHMMSS/results.jsonl`.
 
 ### 5.1 Artifact Schemas
 
-#### `run/YYYYMMDD-HHMMSS/calls.jsonl` (One JSON object per request)
+#### `runs/YYYYMMDD-HHMMSS/calls.jsonl` (One JSON object per request)
 ```json
 {
   "request_id": "uuid4",
@@ -140,8 +140,8 @@ When running an evaluation (`llmendpoint-perf run`), the execution engine perfor
 }
 ```
 
-#### `run/YYYYMMDD-HHMMSS/results.jsonl` (Summary object per run)
-Contains run metadata, configuration summary, total duration, request counts (total, succeeded, failed by error type), throughput (`rps`, `output_tps`, `total_tps`, `slo_goodput_rps`), cost summary, and percentile distributions (`mean`, `std`, `min`, `p50`, `p90`, `p95`, `p99`, `max`) for `ttft_ms`, `tpot_ms`, `e2e_latency_ms`, `input_tokens`, and `output_tokens`.
+#### `runs/YYYYMMDD-HHMMSS/results.jsonl` (Summary object per run)
+Contains run metadata, evaluation and dataset configuration summary (`dataset_generation_prompt`, `dataset_num_items`, `dataset_generation_model`, `dataset_generation_model_endpoint`), total duration, request counts (total, succeeded, failed by error type), throughput (`rps`, `goodput_rps`, `slo_goodput_rps`, `input_tps`, `output_tps`, `total_tps`), cost summary, and percentile distributions (`mean`, `std`, `min`, `p50`, `p90`, `p95`, `p99`, `max`) for `ttft_ms`, `tpot_ms`, `e2e_latency_ms`, `output_tokens_per_sec`, `input_tokens`, and `output_tokens`.
 
 ---
 
@@ -152,30 +152,44 @@ llmendpoint-perf <command> [options]
 ```
 
 ### Available Commands
-* **`init`**: Initializes a new evaluation task in `$LLMENDPOINTPERF_BASEPATH/<task-name>` with a template `config.yaml` (or uploads a local `config.yaml`).
+* **`init`**: Initializes a new evaluation task in `$LLMENDPOINTPERF_BASEPATH/<task-name>` using a mandatory user-supplied `config.yaml` (validated before saving).
   ```bash
-  llmendpoint-perf init <task-name> [--config ./local-config.yaml]
+  llmendpoint-perf init <task-name> --config ./examples/config_text.yaml [--overwrite] [--base-path <path>]
   ```
 * **`generate_dataset`**: Generates the synthetic dataset (`prompts.jsonl`) for the specified evaluation task based on its `config.yaml`.
   ```bash
-  llmendpoint-perf generate_dataset <task-name> [--overwrite]
+  llmendpoint-perf generate_dataset <task-name> [--overwrite] [--base-path <path>]
   ```
-* **`run`**: Executes the benchmark evaluation task and writes `results.jsonl`, `calls.jsonl`, `config.yaml`, and `log.txt` under `run/YYYYMMDD-HHMMSS/`. Both `stdout` and `log.txt` receive identical formatted output.
+* **`run`**: Executes the benchmark evaluation task and writes `results.jsonl`, `calls.jsonl`, `config.yaml`, and `log.txt` under `runs/YYYYMMDD-HHMMSS/`. Both `stdout` and `log.txt` receive identical formatted output.
   ```bash
-  llmendpoint-perf run <task-name> [--config-override key=value ...]
+  llmendpoint-perf run <task-name> [--config-override key=value ...] [--run-id YYYYMMDD-HHMMSS] [--base-path <path>]
   ```
-* **`inspect`**: Lists all runs for a task or prints a formatted summary report of a specific run (or latest run).
+* **`inspect`**: Lists all runs for a task or prints a formatted summary report of a specific run (or latest run), including run overview, dataset information (`generation_model`, `num_items`, `generation_prompt`), throughput & cost summary, and metric percentile distributions.
   ```bash
-  llmendpoint-perf inspect <task-name> [--run-id YYYYMMDD-HHMMSS]
+  llmendpoint-perf inspect <task-name> [--run-id YYYYMMDD-HHMMSS] [--list-runs] [--base-path <path>]
   ```
-* **`compare`**: Compares performance and cost metrics side-by-side across multiple tasks or specific runs.
+* **`compare`**: Compares performance, token distributions (`TTFT`, `TPOT`, `E2E Latency`, `Decode Speed`, `Input Tokens`, `Output Tokens` across `Mean`, `p50`, `p95`, `p99`), cost metrics, and dataset information (`generation_model`, `num_items`, `generation_prompt`) side-by-side across multiple tasks or specific runs.
   ```bash
-  llmendpoint-perf compare <task-name-1>[:<run-id-1>] <task-name-2>[:<run-id-2>]
+  llmendpoint-perf compare <task-name-1>[:<run-id-1>] <task-name-2>[:<run-id-2>] [--base-path <path>]
+  ```
+* **`ui`**: Starts a local web UI server to interactively inspect evaluation tasks under `$LLMENDPOINTPERF_BASEPATH` (requires `LLMENDPOINTPERF_BASEPATH` to be set or `--base-path`, otherwise exits with an error). The UI includes a top task selector and six tabs:
+  * **Runs**: Two-panel view with run list on the left and the full `inspect` summary report on the right.
+  * **Compare**: Side-by-side comparison table across all runs of the selected task.
+  * **Configs**: Two-panel view displaying the `runs/<run-id>/config.yaml` snapshot for each run.
+  * **Dataset**: Two-panel view listing items in `prompts.jsonl` on the left and rendering full item messages (including inline multimodal images) on the right.
+  * **Inference**: Three-panel view with runs on the left, per-request inferences (`calls.jsonl`) in the center, and full inference details (telemetry metrics, input prompt, output, and multimodal images) on the right.
+  * **Metrics help**: Reference guide detailing the streaming measurement timeline, all per-request and aggregated metrics, statistical percentiles, SLO goodput, and cost formulas.
+  ```bash
+  llmendpoint-perf ui [--host 127.0.0.1] [--port 8080] [--base-path <path>]
   ```
 
 ---
 
 ## 7. Configuration File (`config.yaml`)
+
+Ready-to-use example configurations are provided in the `examples/` folder:
+* `examples/config_text.yaml`: Text-only synthetic dataset and evaluation configuration.
+* `examples/config_multimodal.yaml`: Multimodal (text + image) synthetic dataset and evaluation configuration.
 
 Below is the complete configuration schema with required fields and optional parameters (shown with sensible defaults):
 
@@ -223,7 +237,46 @@ evaluation:
 
 ---
 
-## 8. Version and Change Log
+## 8. Codebase Architecture & Implementation Reference
+
+The package is structured as an installable Python project (`pyproject.toml`) providing the `llmendpoint_perf` library and `llmendpoint-perf` CLI script:
+
+```text
+llmendpoint-perf/
+├── pyproject.toml                       # Build system, dependencies, and console_scripts entrypoint
+├── README.md                            # Quickstart and comprehensive usage documentation
+├── spec.md                              # Complete reproducible specification
+├── docs/
+│   ├── config_options.md                # Detailed reference of all config.yaml options and defaults
+│   └── metrics.md                       # Detailed reference and formulas for all generated metrics
+├── examples/
+│   ├── config_text.yaml                 # Example configuration for a text-only dataset and benchmark
+│   └── config_multimodal.yaml           # Example configuration for a multimodal (text + image) dataset and benchmark
+├── llmendpoint_perf/
+│   ├── __init__.py                      # Package version metadata
+│   ├── __main__.py                      # Allows `python -m llmendpoint_perf`
+│   ├── config.py                        # Pydantic v2 models (`TaskConfig`, `DatasetConfig`, `EvaluationConfig`, `PricingConfig`, `SLOConfig`, `MultimodalConfig`), YAML loader/dumper, and dot-notation override application
+│   ├── storage.py                       # `TaskStorage`, `list_tasks()`, and thread-safe `AppendStream` abstracting local paths and `gs://` buckets under `$LLMENDPOINTPERF_BASEPATH`
+│   ├── logging_utils.py                 # `DualLogger` mirroring formatted log lines and reports simultaneously to `stdout` and task log files
+│   ├── metrics.py                       # `CallRecord`, `DistributionStats`, `ThroughputMetrics`, `CostMetrics`, `RunResults`, and `aggregate_run_results()`
+│   ├── client.py                        # `OpenAICompatibleClient` using `httpx` connection pooling for SSE streaming telemetry and retry-backed dataset generation
+│   ├── dataset.py                       # `generate_dataset_for_task()`, diversity persona/style/token-range prompt wrapper, and Pillow-based synthetic/external base64 image encoder
+│   ├── runner.py                        # `run_evaluation_task()`, `RequestPacer`, warmup executor, and multi-threaded worker pool
+│   ├── inspector.py                     # `format_run_summary_report()` and `format_comparison_report()`
+│   ├── ui.py                            # Web inspection UI server (`ThreadingHTTPServer`), JSON REST APIs, and single-page HTML/CSS/JS client
+│   └── cli.py                           # Click CLI commands (`init`, `generate_dataset`, `run`, `inspect`, `compare`, `ui`)
+└── tests/
+    ├── mock_openai_server.py            # Threaded HTTP server mocking OpenAI `/v1/chat/completions` (SSE & JSON)
+    ├── test_config.py                   # Unit tests for config validation, overrides, pricing, and SLOs
+    ├── test_storage.py                  # Unit tests for local and mocked GCS storage
+    ├── test_dataset.py                  # Integration tests for text and multimodal dataset generation
+    ├── test_runner_and_cli.py           # End-to-end tests for `init`, `generate_dataset`, `run`, `inspect`, and `compare`
+    └── test_ui.py                       # Unit and integration tests for the `ui` CLI command and web inspection server
+```
+
+---
+
+## 9. Version and Change Log
 
 * **v0.1 (Initial Draft)**:
   * Defined core objectives (latency, throughput, cost performance, synthetic dataset generation).
@@ -235,5 +288,25 @@ evaluation:
   * **Synthetic Dataset Enhancements (Section 4)**: Added entropy/variation injection to prevent repetitive prompts, concurrent dataset generation (`dataset.num_threads`), and explicit `multimodal` configuration options (synthetic rendered images vs. image directory/GCS sampling).
   * **CLI Expansion (Section 6)**: Added `init`, `inspect`, and `compare` commands to support the full lifecycle of defining, executing, and inspecting evaluation tasks.
   * **Configuration Schema (Section 7)**: Preserved full backward compatibility with the original minimal `config.yaml` while adding optional sections for `api_key_env`, `warmup_requests`, `request_timeout_secs`, `generation_params`, `pricing` (enabling the cost metrics required by Section 1), and `slo`.
-* **v0.3 (2026-10-01 — Dedicated Run Subfolders)**:
-  * Updated Section 3, Section 5, and Section 6 so each run creates its own `run/YYYYMMDD-HHMMSS/` subfolder containing `config.yaml`, `results.jsonl`, `calls.jsonl`, and `log.txt` without redundant date prefixes on the filenames.
+* **v0.3 (2026-10-01 — Dedicated Run Subfolders & Basepath Naming)**:
+  * Updated Section 3, Section 5, and Section 6 so each run creates its own `runs/YYYYMMDD-HHMMSS/` subfolder containing `config.yaml`, `results.jsonl`, `calls.jsonl`, and `log.txt` without redundant date prefixes on the filenames.
+  * Standardized environment variable name to `LLMENDPOINTPERF_BASEPATH`.
+* **v0.4 (2026-10-01 — Full Application Implementation & Architecture Reference)**:
+  * Implemented the complete `llmendpoint_perf` Python package (`config.py`, `storage.py`, `logging_utils.py`, `metrics.py`, `client.py`, `dataset.py`, `runner.py`, `inspector.py`, `cli.py`) and test suite (`tests/`).
+  * Added Section 8 documenting the codebase architecture and module responsibilities for full reproducibility.
+* **v0.5 (2026-10-01 — Mandatory `--config` on `init` & Example Configurations)**:
+  * Updated `llmendpoint-perf init` so `--config <path>` is a mandatory option requiring an explicit initial `config.yaml` supplied by the user.
+  * Added the `examples/` directory with `examples/config_text.yaml` (text-only dataset) and `examples/config_multimodal.yaml` (multimodal text + image dataset).
+* **v0.6 (2026-10-02 — Dataset Metadata in `inspect`/`compare` & Token Distributions in `compare`)**:
+  * Added dataset metadata (`dataset_generation_prompt`, `dataset_num_items`, `dataset_generation_model`, `dataset_generation_model_endpoint`) to `RunResults` with automatic fallback to `config.yaml` when loading older runs.
+  * Updated `llmendpoint-perf inspect` (`format_run_summary_report`) and `llmendpoint-perf compare` (`format_comparison_report`) to include a `DATASET INFORMATION` section displaying the generation model, number of items, and generation prompt.
+  * Updated `llmendpoint-perf compare` (`format_comparison_report`) to output `Mean`, `p50`, `p95`, and `p99` metrics for `Input Tokens` and `Output Tokens`.
+* **v0.7 (2026-10-02 — Interactive Web Inspection UI)**:
+  * Added `llmendpoint-perf ui` CLI command and `llmendpoint_perf/ui.py` web server + single-page UI.
+  * Validates `LLMENDPOINTPERF_BASEPATH` at startup (exiting with an error if unset), provides a top selector for choosing the evaluation task, and renders five tabs (`Runs`, `Compare`, `Configs`, `Dataset`, `Inference`) with full support for multimodal dataset and inference inspection.
+* **v0.8 (2026-10-02 — Configuration & Metrics Documentation + UI `Metrics help` Tab)**:
+  * Added `docs/config_options.md` (comprehensive reference of all `config.yaml` options) and `docs/metrics.md` (detailed definitions and equations for all per-request and aggregated metrics).
+  * Added the `Metrics help` tab to the Web UI (`llmendpoint_perf/ui.py`) rendering the complete metrics reference directly inside the inspector.
+
+
+
