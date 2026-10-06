@@ -16,6 +16,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
     tpot_delay_secs: float = 0.002
     fail_every_n: int = 0
     request_counter: int = 0
+    last_payload: dict[str, Any] = {}
     counter_lock = threading.Lock()
 
     def log_message(self, format: str, *args: Any) -> None:  # pylint: disable=redefined-builtin
@@ -36,7 +37,24 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
 
         with self.counter_lock:
             MockOpenAIHandler.request_counter += 1
+            MockOpenAIHandler.last_payload = payload
             req_num = MockOpenAIHandler.request_counter
+
+        model = payload.get("model", "mock-model")
+        reasoning_effort = payload.get("reasoning_effort")
+        if model == "non-thinking-model" and reasoning_effort not in (None, "none"):
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            err_body = json.dumps(
+                {
+                    "error": {
+                        "message": f"Model '{model}' does not support thinking/reasoning_effort='{reasoning_effort}'."
+                    }
+                }
+            ).encode("utf-8")
+            self.wfile.write(err_body)
+            return
 
         if self.fail_every_n > 0 and (req_num % self.fail_every_n == 0):
             self.send_response(429)
@@ -45,13 +63,24 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"error": {"message": "Rate limit exceeded"}}')
             return
 
-        model = payload.get("model", "mock-model")
         stream = bool(payload.get("stream", False))
         messages = payload.get("messages", [])
 
         # Extract a snippet from user prompt to make responses deterministic yet unique
         user_snippet = f"item-{req_num}"
+        wants_search_terms = False
+        target_images = 1
         if messages:
+            for msg in messages:
+                c = msg.get("content", "")
+                if isinstance(c, str):
+                    if "---SEARCH_TERMS---" in c:
+                        wants_search_terms = True
+                    for line in c.splitlines():
+                        if "Target number of attached images for THIS specific prompt:" in line:
+                            digits = [int(tok) for tok in line.split() if tok.isdigit()]
+                            if digits:
+                                target_images = max(1, digits[0])
             last_content = messages[-1].get("content", "")
             if isinstance(last_content, str):
                 user_snippet = last_content[:40].replace("\n", " ")
@@ -61,6 +90,22 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
                         user_snippet = str(part.get("text", ""))[:40].replace("\n", " ")
 
         if not stream:
+            if wants_search_terms:
+                search_lines = "\n".join(
+                    f"electronics retail product catalog item {req_num} image {i + 1}"
+                    for i in range(target_images)
+                )
+                generated_content = (
+                    f"Synthetic visual question #{req_num}: What are the key ports and "
+                    f"design details visible on this product ({user_snippet})?\n"
+                    f"---SEARCH_TERMS---\n"
+                    f"{search_lines}"
+                )
+            else:
+                generated_content = (
+                    f"Synthetic question #{req_num}: How does product feature X compare to Y "
+                    f"({user_snippet})?"
+                )
             response_obj = {
                 "id": f"chatcmpl-mock-{req_num}",
                 "object": "chat.completion",
@@ -70,7 +115,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": f"Synthetic question #{req_num}: How does product feature X compare to Y ({user_snippet})?",
+                            "content": generated_content,
                         },
                         "finish_reason": "stop",
                     }

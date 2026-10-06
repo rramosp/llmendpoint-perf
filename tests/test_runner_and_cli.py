@@ -78,6 +78,7 @@ evaluation:
         assert first_call["tpot_ms"] > 0
         assert first_call["input_tokens"] == 64
         assert first_call["output_tokens"] == 7
+        assert first_call["output_tokens_without_thinking"] == 5
         assert first_call["reasoning_tokens"] == 2
         assert first_call["cached_input_tokens"] == 16
         assert first_call["cost_usd"] > 0
@@ -85,10 +86,14 @@ evaluation:
         results_obj = json.loads((run1_dir / "results.jsonl").read_text(encoding="utf-8"))
         assert results_obj["total_requests"] == len(calls_lines)
         assert results_obj["succeeded_requests"] == len(calls_lines)
+        assert results_obj["total_output_tokens"] == 7 * len(calls_lines)
+        assert results_obj["total_output_tokens_without_thinking"] == 5 * len(calls_lines)
         assert results_obj["throughput"]["output_tps"] > 0
         assert results_obj["distributions"]["ttft_ms"]["p50"] > 0
+        assert results_obj["distributions"]["output_tokens"]["mean"] == pytest.approx(7.0)
+        assert results_obj["distributions"]["output_tokens_without_thinking"]["mean"] == pytest.approx(5.0)
 
-        # 4. run (second run with config override)
+        # 4. run (second run with config override including thinking_effort)
         res_run2 = runner.invoke(
             cli,
             [
@@ -98,6 +103,8 @@ evaluation:
                 "20261001-100500",
                 "--config-override",
                 "evaluation.max_requests=4",
+                "--config-override",
+                "evaluation.thinking_effort=low",
             ],
         )
         assert res_run2.exit_code == 0, res_run2.output
@@ -116,6 +123,7 @@ evaluation:
         assert "DATASET INFORMATION" in res_inspect.output
         assert "Generation Model               : gemini-2.5-pro" in res_inspect.output
         assert "Number of Items                : 6" in res_inspect.output
+        assert "Output Toks (w/o think)" in res_inspect.output
         assert (
             "questions about retail products with 20 to 500 input tokens, generating ~100 output tokens"
             in res_inspect.output
@@ -141,9 +149,73 @@ evaluation:
             "questions about retail products with 20 to 500 input tokens, generating ~100 output tokens"
             in res_compare.output
         )
-        for token_metric in ("Input Tokens", "Output Tokens"):
+        for token_metric in ("Input Tokens", "Output Tokens", "Output Toks (w/o think)"):
             for stat in ("Mean", "p50", "p95", "p99"):
                 assert f"{token_metric} {stat}" in res_compare.output
+
+        # 7. preflight check aborts when thinking_effort is unsupported by model
+        res_fail = runner.invoke(
+            cli,
+            [
+                "run",
+                "retail-eval",
+                "--run-id",
+                "20261001-101000",
+                "--config-override",
+                "evaluation.model=non-thinking-model",
+                "--config-override",
+                "evaluation.thinking_effort=high",
+            ],
+        )
+        assert res_fail.exit_code != 0
+        assert "Preflight check failed" in res_fail.output
+        assert "does not support thinking/reasoning_effort='high'" in res_fail.output
+
+
+def test_gemini_style_thinking_token_accounting() -> None:
+    """Verify token accounting when total_tokens includes thinking but completion_tokens does not."""
+    from llmendpoint_perf.client import OpenAICompatibleClient
+    from llmendpoint_perf.config import PricingConfig
+
+    pricing = PricingConfig(
+        input_per_1m_tokens=1.0,
+        output_per_1m_tokens=10.0,
+        cached_input_per_1m_tokens=0.25,
+    )
+    record = OpenAICompatibleClient._finalize_call_record(
+        request_id="req-gemini-1",
+        thread_id=0,
+        prompt_index=0,
+        messages=[{"role": "user", "content": "Describe these shoes."}],
+        timestamp_start="2026-10-05T00:00:00Z",
+        timestamp_first_token="2026-10-05T00:00:00.500Z",
+        timestamp_end="2026-10-05T00:00:01.500Z",
+        t_start=10.0,
+        t_first_token=10.5,
+        t_last_token=11.5,
+        t_end=11.5,
+        status_code=200,
+        error_msg=None,
+        content_pieces=[" lightweight", " trail", " shoe"],
+        reasoning_pieces=[],
+        chunk_token_events=3,
+        usage_prompt_tokens=300,
+        usage_completion_tokens=10,
+        usage_total_tokens=556,
+        usage_reasoning_tokens=0,
+        usage_cached_tokens=0,
+        raw_metadata={"model": "gemini-3.8-flash", "finish_reason": "length"},
+        pricing=pricing,
+    )
+    assert record.input_tokens == 300
+    assert record.output_tokens == 256
+    assert record.output_tokens_without_thinking == 10
+    assert record.reasoning_tokens == 246
+    # Derived metrics (TPOT, decode speed, cost) must use output_tokens (256), not 10
+    assert record.tpot_ms == pytest.approx(1000.0 / 255.0, rel=1e-3)
+    assert record.output_tokens_per_sec == pytest.approx(256.0 / 1.0, rel=1e-3)
+    expected_cost = (300 * 1.0 + 256 * 10.0) / 1_000_000.0
+    assert record.cost_usd == pytest.approx(expected_cost)
 
 
 def test_init_requires_config_option(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

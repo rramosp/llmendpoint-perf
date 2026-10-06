@@ -80,8 +80,9 @@ def format_run_summary_report(results: RunResults) -> str:
         lines.append(f"  Errors Breakdown    : {err_summary}")
     lines.append(
         f"  Token Volume        : {results.total_input_tokens} in | "
-        f"{results.total_output_tokens} out | "
-        f"{results.total_reasoning_tokens} reasoning | "
+        f"{results.total_output_tokens} out "
+        f"({results.total_output_tokens_without_thinking} w/o thinking, "
+        f"{results.total_reasoning_tokens} reasoning) | "
         f"{results.total_cached_input_tokens} cached"
     )
     lines.append(subsep)
@@ -123,6 +124,7 @@ def format_run_summary_report(results: RunResults) -> str:
         ("output_tokens_per_sec", "Decode Speed (tok/s)"),
         ("input_tokens", "Input Tokens"),
         ("output_tokens", "Output Tokens"),
+        ("output_tokens_without_thinking", "Output Toks (w/o think)"),
     ]
     for key, label in metric_labels:
         dist = results.distributions.get(key, DistributionStats())
@@ -188,6 +190,7 @@ def format_comparison_report(results_list: list[RunResults]) -> str:
         ("output_tokens_per_sec", "Decode Speed (tok/s)"),
         ("input_tokens", "Input Tokens"),
         ("output_tokens", "Output Tokens"),
+        ("output_tokens_without_thinking", "Output Toks (w/o think)"),
     ]:
         _add_row(
             f"{label} Mean",

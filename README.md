@@ -1,6 +1,6 @@
 # `llmendpoint-perf`
 
-Technical and cost performance benchmarking framework for OpenAI-compatible LLM endpoints.
+Technical and cost performance benchmarking framework for **OpenAI-compatible** LLM endpoints.
 
 `llmendpoint-perf` generates synthetic text and multimodal (text + image) benchmark datasets, runs multi-threaded streaming load tests against `/v1/chat/completions` endpoints, records granular per-request latency and token telemetry, and provides both CLI and interactive Web UI tools to inspect and compare runs.
 
@@ -31,10 +31,15 @@ pip install -e .
    llmendpoint-perf init retail-bench --config examples/config_text.yaml
    ```
 
+   This will copy whatever config file you pass to the tasks directory under $LLMENDPOINTPERF_BASEPATH/retail-bench/config.yaml`. This will allow to change params (model, costs, etc.) between evaluation runs.
+
 3. **Generate the synthetic evaluation dataset** (`prompts.jsonl`):
    ```bash
    llmendpoint-perf generate_dataset retail-bench --overwrite
    ```
+
+   The dataset is generated using the `dataset.generation_prompt` field in `config.yaml`. This will allow you to generate a dataset of prompts that are similar to the one provided, but with some variations.
+
 
 4. **Run a benchmark experiment**:
    ```bash
@@ -76,7 +81,8 @@ Generated prompts are written to `$LLMENDPOINTPERF_BASEPATH/<task-name>/prompts.
   ```json
   {"messages": [{"role": "user", "content": [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]}]}
   ```
-  Multimodal images can be sourced in two ways via `dataset.multimodal.image_source`:
+  Multimodal images can be sourced in three ways via `dataset.multimodal.image_source`:
+  * `"google_search"` *(default when not specified or when the user is not precise about how to generate images)*: For each dataset item, instructs the generator model to create an aligned `(image_search_query, prompt)` pair, searches Google Images for `image_search_query`, downloads and validates a matching real-world image, resizes it to `image_width` × `image_height`, and encodes it as base64.
   * `"synthetic"`: Programmatically renders deterministic test images (charts, product cards, geometric patterns) at the exact configured resolution (`image_width` × `image_height`) and format (`jpeg` or `png`) to benchmark vision token encoding and payload transfer overhead.
   * **Local directory or `gs://bucket/prefix`**: Samples real `.jpg`, `.png`, or `.webp` images from the specified path, resizes them to `image_width` × `image_height`, and encodes them as base64 data URIs.
 

@@ -21,7 +21,7 @@ DEFAULT_CONFIG_YAML = """dataset:
   temperature: 1.0
   multimodal:
     enabled: false
-    image_source: "synthetic"
+    image_source: "google_search"
     image_width: 512
     image_height: 512
     image_format: "jpeg"
@@ -34,6 +34,7 @@ evaluation:
   run_time_secs: 600
   # Optional evaluation settings:
   api_key_env: "OPENAI_API_KEY"
+  thinking_effort: null
   max_requests: null
   warmup_requests: 0
   request_timeout_secs: 120
@@ -58,7 +59,7 @@ class MultimodalConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = False
-    image_source: str = "synthetic"
+    image_source: str = "google_search"
     image_width: int = Field(default=512, ge=16, le=4096)
     image_height: int = Field(default=512, ge=16, le=4096)
     image_format: Literal["jpeg", "png"] = "jpeg"
@@ -155,6 +156,7 @@ class EvaluationConfig(BaseModel):
     run_time_secs: float = Field(default=600.0, gt=0.0)
     api_key_env: str = "OPENAI_API_KEY"
     api_key: str | None = None
+    thinking_effort: str | None = None
     max_requests: int | None = Field(default=None, ge=1)
     warmup_requests: int = Field(default=0, ge=0)
     request_timeout_secs: float = Field(default=120.0, gt=0.0)
@@ -177,6 +179,13 @@ class EvaluationConfig(BaseModel):
     @classmethod
     def _none_to_default_params(cls, v: Any) -> Any:
         return {} if v is None else v
+
+    def effective_generation_params(self) -> dict[str, Any]:
+        """Return generation parameters merged with `thinking_effort` if configured."""
+        params = dict(self.generation_params)
+        if self.thinking_effort is not None and "thinking_effort" not in params:
+            params["thinking_effort"] = self.thinking_effort
+        return params
 
     def resolve_api_key(self) -> str:
         """Resolve the API key from explicit config or environment variables."""

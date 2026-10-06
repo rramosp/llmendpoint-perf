@@ -172,7 +172,12 @@ class OpenAICompatibleClient:
             payload["stream_options"] = {"include_usage": True}
         if generation_params:
             for k, v in generation_params.items():
-                if k not in ("model", "messages", "stream"):
+                if k in ("model", "messages", "stream"):
+                    continue
+                if k == "thinking_effort":
+                    if v is not None:
+                        payload["reasoning_effort"] = v
+                else:
                     payload[k] = v
 
         timestamp_start = _iso_utc_now()
@@ -184,10 +189,12 @@ class OpenAICompatibleClient:
         status_code: int | None = None
         error_msg: str | None = None
         content_pieces: list[str] = []
+        reasoning_pieces: list[str] = []
         chunk_token_events = 0
 
         usage_prompt_tokens: int | None = None
         usage_completion_tokens: int | None = None
+        usage_total_tokens: int | None = None
         usage_reasoning_tokens: int = 0
         usage_cached_tokens: int = 0
         raw_metadata: dict[str, Any] = {"model": model}
@@ -237,6 +244,8 @@ class OpenAICompatibleClient:
                         usage = data.get("usage") or {}
                         usage_prompt_tokens = usage.get("prompt_tokens")
                         usage_completion_tokens = usage.get("completion_tokens")
+                        if usage.get("total_tokens") is not None:
+                            usage_total_tokens = int(usage["total_tokens"])
                         comp_details = usage.get("completion_tokens_details") or {}
                         usage_reasoning_tokens = int(comp_details.get("reasoning_tokens") or 0)
                         prompt_details = usage.get("prompt_tokens_details") or {}
@@ -280,6 +289,8 @@ class OpenAICompatibleClient:
                                     chunk_token_events += 1
                                     if token_text:
                                         content_pieces.append(str(token_text))
+                                    if reasoning_text:
+                                        reasoning_pieces.append(str(reasoning_text))
 
                             usage = chunk.get("usage")
                             if isinstance(usage, dict):
@@ -287,6 +298,8 @@ class OpenAICompatibleClient:
                                     usage_prompt_tokens = int(usage["prompt_tokens"])
                                 if usage.get("completion_tokens") is not None:
                                     usage_completion_tokens = int(usage["completion_tokens"])
+                                if usage.get("total_tokens") is not None:
+                                    usage_total_tokens = int(usage["total_tokens"])
                                 comp_details = usage.get("completion_tokens_details") or {}
                                 if comp_details.get("reasoning_tokens") is not None:
                                     usage_reasoning_tokens = int(comp_details["reasoning_tokens"])
@@ -315,9 +328,11 @@ class OpenAICompatibleClient:
             status_code=status_code,
             error_msg=error_msg,
             content_pieces=content_pieces,
+            reasoning_pieces=reasoning_pieces,
             chunk_token_events=chunk_token_events,
             usage_prompt_tokens=usage_prompt_tokens,
             usage_completion_tokens=usage_completion_tokens,
+            usage_total_tokens=usage_total_tokens,
             usage_reasoning_tokens=usage_reasoning_tokens,
             usage_cached_tokens=usage_cached_tokens,
             raw_metadata=raw_metadata,
@@ -383,9 +398,11 @@ class OpenAICompatibleClient:
         status_code: int | None,
         error_msg: str | None,
         content_pieces: list[str],
+        reasoning_pieces: list[str],
         chunk_token_events: int,
         usage_prompt_tokens: int | None,
         usage_completion_tokens: int | None,
+        usage_total_tokens: int | None,
         usage_reasoning_tokens: int,
         usage_cached_tokens: int,
         raw_metadata: dict[str, Any],
@@ -393,6 +410,7 @@ class OpenAICompatibleClient:
     ) -> CallRecord:
         e2e_latency_ms = max((t_end - t_start) * 1000.0, 0.0)
         full_response = "".join(content_pieces)
+        full_reasoning = "".join(reasoning_pieces)
 
         if status_code != 200 or error_msg is not None:
             return CallRecord(
@@ -416,12 +434,66 @@ class OpenAICompatibleClient:
             if (usage_prompt_tokens is not None and usage_prompt_tokens > 0)
             else estimate_prompt_tokens(messages)
         )
-        if usage_completion_tokens is not None and usage_completion_tokens > 0:
-            output_tokens = usage_completion_tokens
-        elif chunk_token_events > 0:
-            output_tokens = max(chunk_token_events, estimate_tokens_from_text(full_response))
+        if (
+            usage_completion_tokens is not None
+            and usage_completion_tokens >= 0
+            and (
+                usage_completion_tokens > 0
+                or (usage_total_tokens is not None and usage_prompt_tokens is not None)
+            )
+        ):
+            if usage_reasoning_tokens > 0:
+                if (
+                    usage_total_tokens is not None
+                    and usage_prompt_tokens is not None
+                    and usage_total_tokens
+                    >= usage_prompt_tokens + usage_completion_tokens + usage_reasoning_tokens
+                ) or usage_completion_tokens < usage_reasoning_tokens:
+                    # Endpoint reported completion_tokens excluding reasoning_tokens
+                    output_tokens_without_thinking = usage_completion_tokens
+                    output_tokens = usage_completion_tokens + usage_reasoning_tokens
+                    reasoning_tokens = usage_reasoning_tokens
+                else:
+                    # Endpoint reported completion_tokens already including reasoning_tokens
+                    inferred_total_out = (
+                        max(usage_completion_tokens, usage_total_tokens - usage_prompt_tokens)
+                        if (usage_total_tokens is not None and usage_prompt_tokens is not None)
+                        else usage_completion_tokens
+                    )
+                    output_tokens = inferred_total_out
+                    output_tokens_without_thinking = max(
+                        output_tokens - usage_reasoning_tokens, 0
+                    )
+                    reasoning_tokens = usage_reasoning_tokens
+            else:
+                if usage_total_tokens is not None and usage_prompt_tokens is not None:
+                    # Handle endpoints (e.g., Gemini OpenAI API) where total_tokens includes thinking
+                    # tokens while completion_tokens only includes visible output tokens
+                    output_tokens = max(
+                        usage_completion_tokens, usage_total_tokens - usage_prompt_tokens
+                    )
+                    output_tokens_without_thinking = usage_completion_tokens
+                    reasoning_tokens = max(output_tokens - output_tokens_without_thinking, 0)
+                else:
+                    output_tokens = usage_completion_tokens
+                    output_tokens_without_thinking = usage_completion_tokens
+                    reasoning_tokens = 0
         else:
-            output_tokens = estimate_tokens_from_text(full_response)
+            if chunk_token_events > 0:
+                visible_chunks = max(
+                    chunk_token_events - (len(reasoning_pieces) if full_reasoning else 0), 0
+                )
+                visible_tokens = max(
+                    visible_chunks, estimate_tokens_from_text(full_response)
+                )
+            else:
+                visible_tokens = estimate_tokens_from_text(full_response)
+            thinking_tokens = (
+                estimate_tokens_from_text(full_reasoning) if full_reasoning else 0
+            )
+            output_tokens_without_thinking = visible_tokens
+            output_tokens = visible_tokens + thinking_tokens
+            reasoning_tokens = thinking_tokens
 
         if t_first_token is not None:
             ttft_ms = max((t_first_token - t_start) * 1000.0, 0.0)
@@ -460,7 +532,8 @@ class OpenAICompatibleClient:
             e2e_latency_ms=round(e2e_latency_ms, 3),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            reasoning_tokens=usage_reasoning_tokens,
+            output_tokens_without_thinking=output_tokens_without_thinking,
+            reasoning_tokens=reasoning_tokens,
             cached_input_tokens=usage_cached_tokens,
             output_tokens_per_sec=round(output_tps, 3),
             cost_usd=cost_usd,

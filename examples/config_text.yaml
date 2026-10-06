@@ -18,6 +18,7 @@ evaluation:
   run_time_secs: 600
   # Optional evaluation settings:
   api_key_env: "OPENAI_API_KEY"
+  thinking_effort: null
   max_requests: null
   warmup_requests: 0
   request_timeout_secs: 120

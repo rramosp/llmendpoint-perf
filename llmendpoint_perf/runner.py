@@ -86,6 +86,60 @@ class RequestPacer:
         return deadline is None or time.perf_counter() < deadline
 
 
+def run_preflight_check(
+    client: OpenAICompatibleClient,
+    prompts: list[dict[str, Any]],
+    model: str,
+    generation_params: dict[str, Any],
+    pricing: Any,
+    num_threads: int,
+    logger: DualLogger,
+    sample_size: int = 10,
+) -> None:
+    """Execute a preflight check on ~10 random dataset items to catch configuration/model errors early."""
+    count = min(sample_size, len(prompts))
+    if count <= 0:
+        return
+    rng = random.Random(42)
+    sample_indices = rng.sample(range(len(prompts)), k=count)
+    logger.info(
+        f"Executing preflight verification with {count} random dataset item(s) "
+        "(excluded from benchmark metrics)..."
+    )
+    workers = min(max(num_threads, 1), count)
+    failures: list[CallRecord] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [
+            pool.submit(
+                client.stream_chat_completion,
+                messages=prompts[p_idx]["messages"],
+                model=model,
+                thread_id=idx % workers,
+                prompt_index=p_idx,
+                generation_params=generation_params,
+                pricing=pricing,
+            )
+            for idx, p_idx in enumerate(sample_indices)
+        ]
+        for fut in as_completed(futs):
+            rec = fut.result()
+            if not rec.is_success:
+                failures.append(rec)
+
+    if failures:
+        first_fail = failures[0]
+        err_detail = first_fail.error or f"HTTP {first_fail.status_code}"
+        logger.info(
+            f"ERROR: Preflight check failed ({len(failures)}/{count} requests failed). "
+            f"Sample error on prompt #{first_fail.prompt_index}: {err_detail}"
+        )
+        logger.info("Aborting evaluation run due to preflight check errors.")
+        raise RuntimeError(
+            f"Preflight check failed ({len(failures)}/{count} requests failed): {err_detail}"
+        )
+    logger.info(f"Preflight verification passed ({count}/{count} succeeded).")
+
+
 def run_evaluation_task(
     storage: TaskStorage,
     config: TaskConfig | None = None,
@@ -106,6 +160,7 @@ def run_evaluation_task(
 
     prompts = load_prompts(storage)
     eval_cfg = config.evaluation
+    effective_gen_params = eval_cfg.effective_generation_params()
 
     if run_id is None:
         run_id = generate_run_id(storage)
@@ -124,6 +179,7 @@ def run_evaluation_task(
             f"Target model='{eval_cfg.model}' at endpoint='{eval_cfg.model_endpoint}' | "
             f"threads={eval_cfg.num_threads} | wait_ms={eval_cfg.wait_time_between_requests_ms} | "
             f"run_time_secs={eval_cfg.run_time_secs} | max_requests={eval_cfg.max_requests} | "
+            f"thinking_effort={effective_gen_params.get('thinking_effort')} | "
             f"prompts={len(prompts)} ({eval_cfg.sampling_strategy})"
         )
 
@@ -134,6 +190,18 @@ def run_evaluation_task(
             timeout_secs=eval_cfg.request_timeout_secs,
             max_connections=max(eval_cfg.num_threads * 4, 50),
         ) as client:
+            # Preflight Verification Phase (~10 random dataset items)
+            run_preflight_check(
+                client=client,
+                prompts=prompts,
+                model=eval_cfg.model,
+                generation_params=effective_gen_params,
+                pricing=eval_cfg.pricing,
+                num_threads=eval_cfg.num_threads,
+                logger=logger,
+                sample_size=10,
+            )
+
             # Optional Warmup Phase
             if eval_cfg.warmup_requests > 0:
                 logger.info(
@@ -148,7 +216,7 @@ def run_evaluation_task(
                             model=eval_cfg.model,
                             thread_id=i % warmup_workers,
                             prompt_index=i % len(prompts),
-                            generation_params=eval_cfg.generation_params,
+                            generation_params=effective_gen_params,
                             pricing=eval_cfg.pricing,
                         )
                         for i in range(eval_cfg.warmup_requests)
@@ -207,7 +275,7 @@ def run_evaluation_task(
                             model=eval_cfg.model,
                             thread_id=thread_id,
                             prompt_index=prompt_idx,
-                            generation_params=eval_cfg.generation_params,
+                            generation_params=effective_gen_params,
                             pricing=eval_cfg.pricing,
                         )
                         calls_stream.write_line(

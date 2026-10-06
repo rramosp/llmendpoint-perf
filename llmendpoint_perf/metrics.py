@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Any
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from llmendpoint_perf.config import TaskConfig
 
@@ -27,12 +27,23 @@ class CallRecord(BaseModel):
     e2e_latency_ms: float
     input_tokens: int = 0
     output_tokens: int = 0
+    output_tokens_without_thinking: int = 0
     reasoning_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens_per_sec: float = 0.0
     cost_usd: float = 0.0
     response_content: str = ""
     raw_response_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_output_tokens_without_thinking(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "output_tokens_without_thinking" not in data:
+            out_tok = int(data.get("output_tokens") or 0)
+            reas_tok = int(data.get("reasoning_tokens") or 0)
+            data = dict(data)
+            data["output_tokens_without_thinking"] = max(out_tok - reas_tok, 0)
+        return data
 
     @property
     def is_success(self) -> bool:
@@ -120,11 +131,31 @@ class RunResults(BaseModel):
     errors_by_type: dict[str, int] = Field(default_factory=dict)
     total_input_tokens: int
     total_output_tokens: int
+    total_output_tokens_without_thinking: int = 0
     total_reasoning_tokens: int
     total_cached_input_tokens: int
     throughput: ThroughputMetrics
     cost: CostMetrics
     distributions: dict[str, DistributionStats]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_output_without_thinking(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if "total_output_tokens_without_thinking" not in data:
+                tot_out = int(data.get("total_output_tokens") or 0)
+                tot_reas = int(data.get("total_reasoning_tokens") or 0)
+                data["total_output_tokens_without_thinking"] = max(tot_out - tot_reas, 0)
+            dists = data.get("distributions")
+            if isinstance(dists, dict) and "output_tokens_without_thinking" not in dists:
+                dists = dict(dists)
+                if "output_tokens" in dists and int(data.get("total_reasoning_tokens") or 0) == 0:
+                    dists["output_tokens_without_thinking"] = dists["output_tokens"]
+                else:
+                    dists["output_tokens_without_thinking"] = DistributionStats()
+                data["distributions"] = dists
+        return data
 
 
 def aggregate_run_results(
@@ -158,6 +189,7 @@ def aggregate_run_results(
 
     total_in = sum(r.input_tokens for r in succeeded)
     total_out = sum(r.output_tokens for r in succeeded)
+    total_out_no_thinking = sum(r.output_tokens_without_thinking for r in succeeded)
     total_reasoning = sum(r.reasoning_tokens for r in succeeded)
     total_cached = sum(r.cached_input_tokens for r in succeeded)
     total_tokens = total_in + total_out
@@ -196,6 +228,9 @@ def aggregate_run_results(
         "output_tokens": DistributionStats.from_values(
             [r.output_tokens for r in succeeded]
         ),
+        "output_tokens_without_thinking": DistributionStats.from_values(
+            [r.output_tokens_without_thinking for r in succeeded]
+        ),
     }
 
     return RunResults(
@@ -222,6 +257,7 @@ def aggregate_run_results(
         errors_by_type=dict(error_counts),
         total_input_tokens=total_in,
         total_output_tokens=total_out,
+        total_output_tokens_without_thinking=total_out_no_thinking,
         total_reasoning_tokens=total_reasoning,
         total_cached_input_tokens=total_cached,
         throughput=ThroughputMetrics(

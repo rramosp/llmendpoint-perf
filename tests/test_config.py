@@ -92,7 +92,7 @@ def test_example_configs_are_valid() -> None:
 
     mm_cfg = TaskConfig.from_yaml(mm_cfg_path.read_text(encoding="utf-8"))
     assert mm_cfg.dataset.multimodal.enabled is True
-    assert mm_cfg.dataset.multimodal.image_source == "synthetic"
+    assert mm_cfg.dataset.multimodal.image_source == "google_search"
     assert mm_cfg.dataset.multimodal.image_width == 512
     assert mm_cfg.dataset.multimodal.image_height == 512
 

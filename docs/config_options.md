@@ -26,7 +26,7 @@ dataset:
   request_timeout_secs: 120.0
   multimodal:
     enabled: false
-    image_source: "synthetic"
+    image_source: "google_search"
     image_width: 512
     image_height: 512
     image_format: "jpeg"
@@ -48,6 +48,9 @@ evaluation:
   # Authentication (optional)
   api_key_env: "OPENAI_API_KEY"
   api_key: null
+
+  # Thinking/reasoning effort level mapped to 'reasoning_effort' on the endpoint (optional)
+  thinking_effort: null
 
   # Model generation parameters forwarded to /chat/completions (optional)
   generation_params:
@@ -75,7 +78,7 @@ The `dataset` section configures how `llmendpoint-perf generate_dataset <task-na
 
 | Option | Type | Required | Default | Constraints / Possible Values | Description |
 | :--- | :--- | :---: | :---: | :--- | :--- |
-| `generation_prompt` | `string` | **Yes** | — | Non-empty string | Natural-language specification of the prompts to generate. If it includes a token range phrase like `"20 to 500 input tokens"` or `"50-200 tokens"`, the generator automatically samples a per-item target length uniformly within that range. If it includes multimodal keywords (`"multimodal"`, `"with an image"`, `"with images"`, `"attached image"`, `"image input"`, `"visual input"`), multimodal image attachment is automatically enabled. |
+| `generation_prompt` | `string` | **Yes** | — | Non-empty string | Natural-language specification of the prompts to generate. If it includes a token range phrase like `"20 to 500 input tokens"` or `"50-200 tokens"`, the generator automatically samples a per-item target length uniformly within that range. If it includes an image count or range phrase (e.g., `"between 1 and 3 images each prompt"`, `"1 to 3 images"`, or `"2 attached images"`), the generator automatically samples a per-item target image count within that range and attaches that many images to each prompt. If it includes multimodal keywords (`"multimodal"`, `"visual questions"`, `"with an image"`, `"with images"`, `"attached image"`, `"image input"`, `"visual input"`, `"grab the images"`, `"search images"`), multimodal image attachment is automatically enabled. |
 | `num_items` | `integer` | **Yes** | — | `>= 1` | Total number of synthetic evaluation items (lines) to generate in `prompts.jsonl`. |
 | `generation_model_endpoint` | `string` | **Yes** | — | Valid HTTP/HTTPS URL | Base URL of the OpenAI-compatible API endpoint used to generate the dataset (e.g., `"https://generativelanguage.googleapis.com/v1beta/openai"` or `"http://localhost:8000/v1"`). `/chat/completions` is appended automatically if not already at the end of the URL. |
 | `generation_model` | `string` | **Yes** | — | Non-empty string | Model identifier sent to `generation_model_endpoint` to synthesize the prompts (e.g., `"gemini-3.8-flash"`, `"gemini-2.5-pro"`). |
@@ -92,7 +95,7 @@ Controls multimodal (`text` + base64 `image_url`) dataset generation:
 | Option | Type | Required | Default | Constraints / Possible Values | Description |
 | :--- | :--- | :---: | :---: | :--- | :--- |
 | `multimodal.enabled` | `boolean` | No | `false` | `true`, `false` | When `true`, each generated prompt in `prompts.jsonl` is formatted as a multimodal content array containing both `{"type": "text", ...}` and `{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}`. |
-| `multimodal.image_source` | `string` | No | `"synthetic"` | `"synthetic"`, local path, or `gs://bucket/prefix` | Source of images attached to multimodal prompts:<br>• `"synthetic"`: Programmatically renders diverse test images (charts, product cards, geometric patterns) at `image_width` × `image_height`.<br>• **Local file or directory path**: Samples `.jpg`, `.jpeg`, `.png`, or `.webp` files from disk and resizes them to `image_width` × `image_height`.<br>• **`gs://bucket/prefix`**: Samples `.jpg`, `.jpeg`, `.png`, or `.webp` blobs from GCS and resizes them to `image_width` × `image_height`. |
+| `multimodal.image_source` | `string` | No | `"google_search"` | `"google_search"`, `"synthetic"`, local path, or `gs://bucket/prefix` | Source of images attached to multimodal prompts:<br>• `"google_search"` *(default when not specified or when the user is not precise about how to generate images)*: Prompts `generation_model` to generate an aligned `(image_search_query, prompt)` pair for each item, searches Google Images, downloads and resizes a matching image to `image_width` × `image_height`, and encodes it as base64.<br>• `"synthetic"`: Programmatically renders deterministic test images (charts, product cards, geometric patterns) at `image_width` × `image_height`.<br>• **Local file or directory path**: Samples `.jpg`, `.jpeg`, `.png`, or `.webp` files from disk and resizes them to `image_width` × `image_height`.<br>• **`gs://bucket/prefix`**: Samples `.jpg`, `.jpeg`, `.png`, or `.webp` blobs from GCS and resizes them to `image_width` × `image_height`. |
 | `multimodal.image_width` | `integer` | No | `512` | `16` to `4096` | Width (in pixels) of the attached image. |
 | `multimodal.image_height` | `integer` | No | `512` | `16` to `4096` | Height (in pixels) of the attached image. |
 | `multimodal.image_format` | `string` | No | `"jpeg"` | `"jpeg"`, `"png"` | Image compression format used when encoding the image into a base64 data URI (`data:image/jpeg;base64,...` or `data:image/png;base64,...`). |
@@ -110,13 +113,14 @@ The `evaluation` section configures how `llmendpoint-perf run <task-name>` execu
 | `num_threads` | `integer` | No | `10` | `>= 1` | Number of concurrent worker threads dispatching streaming inference requests. |
 | `wait_time_between_requests_ms` | `float` | No | `20.0` | `>= 0.0` | Minimum global delay (in milliseconds) enforced between consecutive request dispatches across all worker threads. Set to `0` to dispatch requests as fast as worker threads become free. |
 | `run_time_secs` | `float` | No | `600.0` | `> 0.0` | Total duration (in seconds) of the measurement window. Worker threads stop dispatching new requests once `run_time_secs` has elapsed, and in-flight requests are awaited before computing final statistics. |
+| `thinking_effort` | `string \| null` | No | `null` | `null`, `"none"`, `"low"`, `"medium"`, `"high"` | Optional thinking/reasoning effort level for evaluation calls. When set to a non-null string, `llmendpoint-perf` maps `thinking_effort` to `"reasoning_effort"` in the `/chat/completions` request payload (can also be set under `generation_params.thinking_effort`). Verified during the preflight check of ~10 random dataset items before the benchmark starts. |
 | `max_requests` | `integer \| null` | No | `null` | `null` or integer `>= 1` | Optional upper bound on the total number of measured requests to dispatch. If set, the run terminates as soon as either `max_requests` is reached or `run_time_secs` elapses (whichever comes first). |
 | `warmup_requests` | `integer` | No | `0` | `>= 0` | Number of initial requests executed before starting the benchmark clock. Useful for warming up connection pools or endpoint caches; excluded from `calls.jsonl` and `results.jsonl`. |
 | `request_timeout_secs` | `float` | No | `120.0` | `> 0.0` | Maximum time (in seconds) to wait for an individual streaming request before recording a timeout failure. |
 | `sampling_strategy` | `string` | No | `"round_robin"` | `"round_robin"`, `"random"` | Strategy for selecting prompts from `prompts.jsonl`:<br>• `"round_robin"`: Cycles sequentially through `0, 1, ..., N-1, 0, ...`.<br>• `"random"`: Samples uniformly at random using a deterministic seed (`42`). |
 | `api_key_env` | `string` | No | `"OPENAI_API_KEY"` | Environment variable name | Environment variable used to look up the Bearer API key for `model_endpoint`. Fallback lookup order: `evaluation.api_key` → `$<api_key_env>` → `$OPENAI_API_KEY` → `$GEMINI_API_KEY` → `$GOOGLE_API_KEY` → `"EMPTY"`. |
 | `api_key` | `string \| null` | No | `null` | String or `null` | Optional explicit API key string override. |
-| `generation_params` | `mapping` | No | `{}` | Any OpenAI `/chat/completions` request fields | Dictionary of additional generation parameters merged directly into the `/chat/completions` JSON request body. Common options include:<br>• `temperature` (`float`, e.g., `0.7`)<br>• `max_tokens` / `max_completion_tokens` (`int`, e.g., `256`)<br>• `top_p` (`float`, e.g., `0.95`)<br>• `reasoning_effort` (`"low"`, `"medium"`, `"high"`)<br>• `seed` (`int`)<br>• `stop` (`list[str]` or `str`)<br>*(Note: `model`, `messages`, `stream`, and `stream_options` are controlled by `llmendpoint-perf` and cannot be overridden via `generation_params`.)* |
+| `generation_params` | `mapping` | No | `{}` | Any OpenAI `/chat/completions` request fields | Dictionary of additional generation parameters merged directly into the `/chat/completions` JSON request body. Common options include:<br>• `temperature` (`float`, e.g., `0.7`)<br>• `max_tokens` / `max_completion_tokens` (`int`, e.g., `256`)<br>• `top_p` (`float`, e.g., `0.95`)<br>• `thinking_effort` (`"none"`, `"low"`, `"medium"`, `"high"` — mapped to `reasoning_effort` on the wire)<br>• `seed` (`int`)<br>• `stop` (`list[str]` or `str`)<br>*(Note: `model`, `messages`, `stream`, and `stream_options` are controlled by `llmendpoint-perf` and cannot be overridden via `generation_params`.)* |
 
 ### `evaluation.pricing` Sub-Options
 
